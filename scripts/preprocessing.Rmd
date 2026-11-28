@@ -1,0 +1,133 @@
+---
+title: "preprocessing"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+```{r}
+#install.packages('mice')
+library(tidyverse)
+library(mice)
+library(naniar)
+library(brms)
+
+tiantan <- read_csv(
+  '../data/PRSA_Data_Tiantan_20130301-20170228.csv')
+wanliu <- read_csv(
+  '../data/PRSA_Data_Wanliu_20130301-20170228.csv')
+wanshouxigong <- read_csv(
+  '../data/PRSA_Data_Wanshouxigong_20130301-20170228.csv')
+```
+
+Daily average aggregation
+```{r}
+# Combine datasets, factor station
+air_quality <- bind_rows(
+  tiantan,
+  wanliu,
+  wanshouxigong
+) |>
+  mutate(
+    station = as.factor(station))
+```
+
+Missingness
+```{r}
+# Missingness statistics
+miss_var_summary(air_quality)
+
+# Visualize missingness
+vis_miss(air_quality, warn_large_data = FALSE)
+```
+
+Check correlations
+```{r}
+subset <- air_quality |>  select(
+    PM2.5, TEMP, DEWP, WSPM,
+    PM10, NO2, SO2, CO, 
+    O3, PRES, RAIN
+  )
+
+corr_matrix <- round(cor(subset, use = 'complete.obs'), 2)
+
+corrplot(
+  corr_matrix,
+  method = 'ellipse',
+  type = 'lower',
+  addCoef.col = 'black',
+  number.cex = .7
+)
+```
+
+Suppose MAR, random streaks of missing observations across rows. We impute hourly observations first, then aggregate to daily averages.
+```{r}
+# Prepare hourly data, select variables of interest
+imputed_data <- air_quality |>
+  select(
+    year, month, day, hour,
+    PM2.5, TEMP, DEWP, WSPM,
+    station, PM10, NO2, SO2, CO,
+    O3, PRES, RAIN
+  )
+
+# Generate predictor matrix using quickpred()
+pred <- quickpred(
+  imputed_data,
+  mincor = 0.1,
+  minpuc = 0.25
+)
+
+# Ensure date/time and station variables predict air quality variables
+pred[
+  c("PM2.5", "TEMP", "DEWP", "WSPM",
+    "PM10", "NO2", "SO2", "CO", "O3", "PRES", "RAIN"),
+  c("year", "month", "day", "hour", "station")
+] <- 1
+
+# No variable predicts itself
+diag(pred) <- 0
+
+# Do not impute date/time or station variables
+# meth default for numerical variables is predictive mean matching (pmm)
+meth <- make.method(imputed_data)
+
+meth[c("year", "month", "day", "hour", "station")] <- ""
+
+# Run MICE pmm imputation
+imp <- mice(
+  imputed_data,
+  m = 1,
+  maxit = 10,
+  predictorMatrix = pred,
+  method = meth,
+  seed = 123
+)
+
+# Extract
+complete_imp <- complete(imp, 1)
+
+# Aggregate into daily averages
+complete_imp <- complete_imp |>
+  mutate(
+    date = as.Date(sprintf(
+      "%04d-%02d-%02d", year, month, day
+    ))
+  ) |>
+  group_by(station, date) |>
+  summarise(
+    across(
+      c(PM2.5, TEMP, DEWP, WSPM,
+        PM10, NO2, SO2, CO, O3, PRES, RAIN),
+      mean
+    ),
+    .groups = "drop"
+  )
+
+# Save as a single csv file
+write_csv(complete_imp, file = '../data/imputed_data.csv')
+```
+
+Note that because we are using m = 1 (creating only one imputed dataset), the subsequent Bayesian HMC analysis will not incorporate uncertainty between multiple imputed datasets. Also, standard MICE does not explicitly model temporal autocorrelation.

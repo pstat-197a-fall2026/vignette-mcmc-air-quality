@@ -1,0 +1,362 @@
+---
+title: "diagnostics_plots"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(brms)
+library(cmdstanr)
+library(mice)
+library(posterior)
+library(bayesplot)
+
+# Helper function to save plots
+save_plot <- function(plot, filename, width = 9, height = 6) {
+  ggsave(
+    filename = file.path('../figures/cmdstan_hmc', filename),
+    plot = plot,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+}
+
+hmc_model <- read_rds('../data/models/hmc_model.rds')
+```
+
+### Convergence diagnostics
+
+These functions help identify how well our HMC markov chains explored the posterior distribution. Essentially verifies if the markov chains reached our target distributions. This is helpful to identify issues in our chosen amount of iterations, number of chains, sampling efficiency-our model fit parameters. May also be useful to adjust our priors.
+
+Get Rhat and effective sample size
+```{r}
+# Extract posterior draws
+draws <- as_draws_array(hmc_model)
+
+# Calculate convergence statistics
+convergence <- summarise_draws(
+  draws,
+  mean,
+  sd,
+  rhat,
+  ess_bulk,
+  ess_tail,
+  mcse_mean
+)
+
+# Save convergence statistics
+write_csv(convergence,
+          '../figures/cmdstan_hmc/convergence_statistics.csv')
+```
+
+Divergent transitions
+```{r}
+# Check the number of divergent transitions
+np <- nuts_params(hmc_model)
+
+divergences <- np |>
+  filter(Parameter == "divergent__") |>
+  summarise(
+    total_divergences = sum(Value),
+    total_iterations = n(),
+    divergence_rate = total_divergences / total_iterations
+  )
+
+print(divergences)
+```
+
+Trace plots for parameters (Important)
+```{r}
+# variables(hmc_model)
+p_trace <- mcmc_trace(
+  draws,
+  pars = c(
+    "b_Intercept",
+    "b_TEMP_z",
+    "b_DEWP_z",
+    "b_WSPM_z",
+    "sd_station__Intercept",
+    "sigma"
+  )
+)
+
+save_plot(p_trace, "trace_plots.png")
+```
+
+Markov Chain Density Overlay
+```{r}
+# Want all four chains to produce similar distributions for each parameter
+p_density <- mcmc_dens_overlay(
+  draws,
+  pars = c(
+    "b_Intercept",
+    "b_TEMP_z",
+    "b_DEWP_z",
+    "b_WSPM_z",
+    "sd_station__Intercept",
+    "sigma"
+  )
+)
+
+save_plot(p_density, "mc_density_overlays.png")
+```
+
+Rank plots (Optional)
+```{r, eval = FALSE}
+p_rank <- mcmc_rank_overlay(
+  draws,
+  pars = c(
+    "b_Intercept",
+    "b_TEMP_z",
+    "b_DEWP_z",
+    "b_WSPM_z",
+    "sd_station__Intercept",
+    "sigma"
+  )
+)
+
+save_plot(p_rank, "rank_plots.png")
+```
+
+Autocorrelation plot (optional)
+```{r, eval = FALSE}
+p_acf <- mcmc_acf(
+  draws,
+  pars = c(
+    "b_Intercept",
+    "b_TEMP_z",
+    "b_DEWP_z",
+    "b_WSPM_z",
+    "sd_station__Intercept",
+    "sigma"
+  )
+)
+
+save_plot(p_acf, "04_autocorrelation.png")
+```
+
+### Posterior Distribution Plots
+
+This visualizes our posterior distributions and 95% credible intervals for the regression coefficients and variance parameters.
+
+Regression Coefficients
+```{r}
+p_coefficients <- mcmc_areas(
+  draws,
+  pars = c(
+    "b_TEMP_z",
+    "b_DEWP_z",
+    "b_WSPM_z"
+  ),
+  prob = 0.95
+) +
+  labs(title = "Posterior Distributions of Regression Coefficients") +
+  theme_minimal()
+
+save_plot(
+  p_coefficients,
+  "regression_coefficients.png",
+  width = 10,
+  height = 6
+)
+```
+
+Residual and station standard deviation
+```{r}
+p_hyperparameters <- mcmc_areas(
+  draws,
+  pars = c(
+    "sd_station__Intercept",
+    "sigma"
+  ),
+  prob = 0.95
+) +
+  labs(title = "Posterior Distributions of Model Parameters") +
+  theme_minimal()
+
+save_plot(
+  p_hyperparameters,
+  "hierarchical_parameters.png",
+  width = 10,
+  height = 6
+)
+```
+
+Station baseline distributions
+```{r}
+# Extract random intercept posterior draws
+station_effects <- ranef(
+  hmc_model,
+  summary = FALSE
+)$station
+
+# Extract population intercept
+posterior_draws <- as_draws_df(hmc_model)
+
+station_names <- dimnames(station_effects)[[2]]
+
+# Calculate station-specific baselines
+station_baselines <- map_dfr(
+  seq_along(station_names),
+  function(j) {
+    tibble(
+      station = station_names[j],
+      baseline = posterior_draws$b_Intercept +
+        station_effects[, j, "Intercept"]
+    )
+  }
+)
+
+# Plot station baseline distributions
+p_station <- ggplot(
+  station_baselines,
+  aes(x = baseline, fill = station)
+) +
+  geom_density(alpha = 0.35) +
+  labs(
+    title = "Posterior Distributions of Station Baselines",
+    x = "Standardized log-PM2.5",
+    y = "Posterior density",
+    fill = "Station"
+  ) +
+   scale_fill_manual(
+     values = c("Tiantan" = "darkblue",
+                "Wanliu" = "#FF8C00",
+                "Wanshouxigong" = "#88E788")) +
+  theme_minimal()
+
+save_plot(
+  p_station,
+  "station_baselines.png",
+  width = 10,
+  height = 6
+)
+```
+
+
+### Posterior Predictive Checks
+
+These test how well our fitted model represents the observed data, by comparing/overlaying the observed to simulated datasets, which is drawn from our HMC estimated posterior distributions.
+
+Posterior predictive check of target population parameter PM2.5
+```{r}
+# Simulate replicated datasets from the model and compare them with the observed data.
+
+# We simulate 200 replicated datasets
+set.seed(123)
+
+yrep <- posterior_predict(
+  hmc_model,
+  ndraws = 200
+)
+
+# Compare observed and replicated distributions
+p_ppc <- ppc_dens_overlay(
+  y = imp$PM25_z,
+  yrep = yrep[1:100, ]
+) +
+  labs(
+    title = "Posterior Predictive Check",
+    x = "Standardized log-PM2.5",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+save_plot(
+  p_ppc,
+  "posterior_predictive.png",
+  width = 10,
+  height = 7
+)
+```
+
+PPC by station
+```{r}
+stations <- unique(imp$station)
+
+p_ppc_station <- map(
+  stations,
+  function(s) {
+
+    idx <- which(imp$station == s)
+
+    ppc_dens_overlay(
+      y = imp$PM25_z[idx],
+      yrep = yrep[1:100, idx, drop = FALSE]
+    ) +
+      labs(
+        title = s,
+        x = "Standardized log-PM2.5",
+        y = "Density"
+      ) +
+      theme_minimal()
+  }
+) |>
+  patchwork::wrap_plots(ncol = 3) +
+  patchwork::plot_annotation(
+    title = "Posterior Predictive Checks by Station"
+  )
+
+save_plot(
+  p_ppc_station,
+  "ppc_by_station.png",
+  width = 15,
+  height = 6
+)
+```
+
+### Residuals Diagnostic
+
+To test how well our model fits to the data (it doesnt)
+
+Residuals vs. Fitted
+```{r}
+# Generate posterior expected values
+epred <- posterior_epred(
+  hmc_model,
+  ndraws = 500
+)
+
+# Calculate posterior median fitted values
+fitted_values <- apply(epred, 2, median)
+
+# Construct residual dataset
+residual_data <- imp |>
+  mutate(
+    fitted = fitted_values,
+    residual = PM25_z - fitted
+  )
+
+# Plot residuals
+p_residual <- ggplot(
+  residual_data,
+  aes(x = fitted, y = residual)
+) +
+  geom_point(alpha = 0.3) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_smooth(
+    method = "loess",
+    se = TRUE
+  ) +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Posterior Median Fitted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+save_plot(
+  p_residual,
+  "residuals_vs_fitted.png"
+)
+```
+

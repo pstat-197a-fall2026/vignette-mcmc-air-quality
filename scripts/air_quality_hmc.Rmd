@@ -8,12 +8,123 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE,
                       warning = FALSE)
 ```
 
+Data: https://archive.ics.uci.edu/dataset/501/beijing+multi+site+air+quality+data
+
 ```{r}
 library(tidyverse)
-
-tiantan <- read_csv(
-  '../data/PRSA_Data_Tiantan_20130301-20170228.csv')
-wanliu <- read_csv(
-  '../data/PRSA_Data_Wanliu_20130301-20170228.csv')
+library(brms)
+library(cmdstanr)
+library(mice)
+library(posterior)
+library(bayesplot)
 ```
 
+Imputed data preparation
+```{r}
+imp <- read_csv('../data/imputed_data.csv') |> 
+  mutate(station = as.factor(station))
+
+# Standardize variables in the imputed dataset
+# This is so our priors are easier to specify for demonstration purposes
+# We log1p-transform PM2.5 reduce right-skewness
+
+imp <- imp |>
+    mutate(
+      PM25_z = as.numeric(scale(log1p(PM2.5))),
+      TEMP_z = as.numeric(scale(TEMP)),
+      DEWP_z = as.numeric(scale(DEWP)),
+      WSPM_z = as.numeric(scale(WSPM))
+    )
+```
+
+```{r}
+# Original PM2.5
+ggplot(imp, aes(x = PM2.5)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Original PM2.5 Distribution")
+
+# Log-transformed PM2.5
+ggplot(imp, aes(x = as.numeric(scale(log1p(PM2.5))))) +
+  geom_histogram(bins = 40) +
+  labs(title = "Log-Transformed PM2.5 Distribution")
+```
+
+Fit Bayesian Hierarchical Model
+```{r}
+# Define hierarchical model
+# Adding (1 | station) ensures varying station intercepts
+model_formula <- brmsformula(
+  PM25_z ~ 1 + TEMP_z + DEWP_z + WSPM_z +
+    (1 | station)
+)
+
+# Specify priors
+# Normal(0, 1) priors for the intercept and regression coefficients.
+# Exponential(1) priors for the station-level standard deviation
+# and residual standard deviation. Ensures sd is non-negative.
+
+model_priors <- c(
+  prior(normal(0, 1), class = "Intercept"),
+  prior(normal(0, 1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(exponential(1), class = "sigma")
+)
+```
+
+Call brm fit on the imputed dataset:
+```{r, eval = FALSE}
+hmc_model <- brm(
+  formula = model_formula,
+  data = imp,
+  family = gaussian(),
+  prior = model_priors,
+  backend = "cmdstanr",
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  cores = 4,
+  seed = 123,
+  control = list(adapt_delta = 0.95)
+)
+
+# All 4 chains finished successfully.
+# Mean chain execution time: 307.2 seconds.
+# Total execution time: 335.2 seconds.
+
+# Hourly data model runtime :(
+# All 4 chains finished successfully.
+# Mean chain execution time: 5538.2 seconds.
+# Total execution time: 8977.1 seconds.
+
+saveRDS(hmc_model, file = '../data/models/hmc_model.rds')
+```
+
+| Argument | Purpose |
+| --- | --- |
+| formula	| Specifies the hierarchical regression model |
+| data | Supplies the imputed daily-average dataset |
+| family = gaussian()	| Assumes normally distributed residuals |
+| prior	| Specifies the Bayesian prior distributions |
+| backend = "cmdstanr" | Uses Stan through CmdStanR |
+| chains = 4	| Runs four independent Markov chains |
+| iter = 2000	| Runs 2,000 iterations per chain |
+| warmup = 1000	| Discards the first 1,000 iterations per chain |
+| cores = 4	| Allows four chains to run in parallel |
+| seed = 123	| Makes sampling reproducible |
+| adapt_delta = 0.95 | Controls the target HMC acceptance probability |
+
+
+### Bayesian Hierarchical Model Results
+
+```{r}
+hmc_model <- read_rds('../data/models/hmc_model.rds')
+# Examine model summary
+summary(hmc_model)
+```
+A Bayesian hierarchical regression model was fitted using Hamiltonian Monte Carlo (HMC) to investigate the associations between meteorological variables and daily PM2.5 concentrations across three monitoring stations. The response variable was transformed using $log(1+x)$ and standardization. Station-specific random intercepts were incorporated to model baseline pollution level differences between monitoring locations.
+
+The posterior estimates indicated a negative association between temperature and PM2.5 $\beta$ = -0.76, 95% credible interval: [-0.82, -0.71]) and a positive association between dew point and PM2.5 $\beta$ = 0.75, 95% credible interval: [0.69, 0.81]). Wind speed also exhibited a negative association with PM2.5 $\beta$ = -0.24, 95% credible interval: [-0.27, -0.22]).
+
+The estimated standard deviation of the station-specific intercepts was 1.26, suggesting potential differences in baseline pollution levels across monitoring stations. However, its relatively wide credible interval indicates substantial uncertainty in the magnitude of these differences.
+
+Although the regression coefficients exhibited relatively well-defined posterior distributions, low bulk effective sampling size in the population-level station intercept and station-level standard deviation was present. Bulk ESS measures MCMC sampling efficiency in the center (bulk) of a posterior distribution, while Tail ESS measures efficiency in the extreme outer edges (tails). Generally bulk is higher than tail. These convergence diagnostics imply that additional sampling and diagnostic evaluation is necessary.
