@@ -1,0 +1,60 @@
+---
+title: "vignette.qmd"
+author: "James Liang, Jocelyn Lee, Christian Solares, Erika Nares, Runxin Shen"
+date: today
+format:
+  html:
+    theme: cosmo
+    toc: false
+    code-fold: true
+    number-sections: true
+  pdf:
+    toc: false
+    number-sections: true
+    fig-pos: "H"      
+    geometry: margin=1in
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+# Monte Carlo & MCMC Workflow
+
+Provide definitions and add Images/Visuals to explain MCMC.
+
+# Hamiltonian Monte Carlo (HMC)
+
+-   Add necessary equations and visuals to describe step-by-step process of HMC
+
+-   Describe general workflow (from code)
+
+From code:
+
+-   HMC treats the parameters as the position of a particle sliding over the surface U(theta) = -log posterior. It gives the particle a random momentum, simulates its motion (leapfrog steps), and accepts the end point with a Metropolis correction.
+
+-   Positive parameters (tau, sigma) are sampled on the log scale so that HMC can move freely over (-Inf, Inf).
+
+-   Log Posterior (combining likelihood, station prior, parameter priors, and log-Jacobians)
+
+-   Log Gradient (checked against finite differences)
+
+-   Leapfrog step size, step count, and inverse mass
+
+-   Metropolis Accept/Reject
+
+# Application to Beijing Multi-Site Air Quality Data (UCI)
+
+-   describe data and variables used
+
+-   explain Pooled OLS/Fixed Effects OLS (make own section?)
+
+-   explain hmc_step (one HMC interation) and run_hmc
+
+-   add results tables/figures and compare OLS with HMC
+
+# Conclusion
+
+-   summarize what we did in the vignette and other applications
